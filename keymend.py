@@ -5,11 +5,11 @@ import pandas as pd
 from dotenv import load_dotenv
 from pytrends.request import TrendReq
 
-
 # =========================================================
-# 1. 환경변수 로드 (naver.env)
+# 1. ENV 로드
 # =========================================================
-load_dotenv("naver.env")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, "naver.env"))
 
 NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID")
 NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
@@ -17,109 +17,91 @@ NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
 if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
     raise EnvironmentError("NAVER_CLIENT_ID 또는 NAVER_CLIENT_SECRET이 설정되지 않았습니다.")
 
-
 # =========================================================
-# 2. 네이버 데이터랩 검색 추이
+# 2. 네이버 데이터랩
 # =========================================================
-def fetch_naver_trend(
-    keywords,
-    start_date="2024-01-01",
-    end_date="2024-12-31",
-    time_unit="month"
-):
+def fetch_naver_trend(keywords, start_date, end_date):
     url = "https://openapi.naver.com/v1/datalab/search"
-
     headers = {
         "X-Naver-Client-Id": NAVER_CLIENT_ID,
         "X-Naver-Client-Secret": NAVER_CLIENT_SECRET,
         "Content-Type": "application/json"
     }
 
-    payload = {
-        "startDate": start_date,
-        "endDate": end_date,
-        "timeUnit": time_unit,
-        "keywordGroups": [
-            {
-                "groupName": "KEYWORDS",
-                "keywords": keywords
-            }
-        ]
-    }
+    rows = []
 
-    response = requests.post(url, headers=headers, data=json.dumps(payload))
-    response.raise_for_status()
+    for kw in keywords:
+        payload = {
+            "startDate": start_date,
+            "endDate": end_date,
+            "timeUnit": "month",
+            "keywordGroups": [
+                {
+                    "groupName": kw,
+                    "keywords": [kw]
+                }
+            ]
+        }
 
-    data = response.json()["results"][0]["data"]
-    df = pd.DataFrame(data)
-    df.rename(columns={"period": "date", "ratio": "naver_ratio"}, inplace=True)
+        res = requests.post(url, headers=headers, data=json.dumps(payload))
+        res.raise_for_status()
 
-    return df
+        data = res.json()["results"][0]["data"]
 
+        for d in data:
+            rows.append({
+                "keyword": kw,
+                "date": d["period"],
+                "ratio": d["ratio"]
+            })
 
-# =========================================================
-# 3. Google Trends 검색 추이
-# =========================================================
-def fetch_google_trend(
-    keywords,
-    start_date="2024-01-01",
-    end_date="2024-12-31",
-    geo="KR"
-):
-    pytrends = TrendReq(hl="ko-KR", tz=540)
-
-    timeframe = f"{start_date} {end_date}"
-    pytrends.build_payload(
-        kw_list=keywords,
-        timeframe=timeframe,
-        geo=geo
-    )
-
-    df = pytrends.interest_over_time()
-
-    if "isPartial" in df.columns:
-        df = df.drop(columns=["isPartial"])
-
-    df.reset_index(inplace=True)
-    df.rename(columns={"date": "date"}, inplace=True)
-
-    return df
-
+    return pd.DataFrame(rows)
 
 # =========================================================
-# 4. 실행부 (하나의 파이프라인)
+# 3. 상승률 기반 키워드 추천
+# =========================================================
+def recommend_keywords(df, top_n=5):
+    recommendations = []
+
+    for kw, g in df.groupby("keyword"):
+        g = g.sort_values("date")
+
+        if len(g) < 3:
+            continue
+
+        recent = g.iloc[-1]["ratio"]
+        prev_avg = g.iloc[-3:-1]["ratio"].mean()
+
+        growth = ((recent - prev_avg) / prev_avg) * 100 if prev_avg > 0 else 0
+
+        recommendations.append({
+            "keyword": kw,
+            "latest_ratio": round(recent, 2),
+            "growth_rate(%)": round(growth, 2)
+        })
+
+    rec_df = pd.DataFrame(recommendations)
+    return rec_df.sort_values("growth_rate(%)", ascending=False).head(top_n)
+
+# =========================================================
+# 4. 실행부
 # =========================================================
 if __name__ == "__main__":
-    # 키워드 설정
-    naver_keywords = ["인공지능", "AI", "ChatGPT"]
-    google_keywords = ["Artificial Intelligence", "ChatGPT"]
+    # 🔹 키워드 후보 풀 (여기만 계속 늘리면 됩니다)
+    keyword_pool = [
+        "인공지능", "ChatGPT", "생성형 AI", "AI 투자", "AI 관련주",
+        "프롬프트 엔지니어링", "AI 윤리", "AI 규제", "오픈AI", "LLM"
+    ]
 
-    start_date = "2024-01-01"
-    end_date = "2024-12-31"
-
-    # 네이버 트렌드
-    naver_df = fetch_naver_trend(
-        keywords=naver_keywords,
-        start_date=start_date,
-        end_date=end_date
+    df = fetch_naver_trend(
+        keywords=keyword_pool,
+        start_date="2024-01-01",
+        end_date="2024-12-31"
     )
 
-    # 구글 트렌드
-    google_df = fetch_google_trend(
-        keywords=google_keywords,
-        start_date=start_date,
-        end_date=end_date
-    )
+    추천 = recommend_keywords(df, top_n=5)
 
-    # 결과 출력
-    print("\n===== NAVER DATA LAB =====")
-    print(naver_df.head())
+    print("\n🔥 이번 주 블로그 추천 키워드 TOP 5")
+    print(추천)
 
-    print("\n===== GOOGLE TRENDS =====")
-    print(google_df.head())
-
-    # CSV 저장
-    naver_df.to_csv("naver_trend.csv", index=False)
-    google_df.to_csv("google_trend.csv", index=False)
-
-    print("\nCSV 파일 저장 완료")
+    추천.to_csv("weekly_keyword_recommendation.csv", index=False)
